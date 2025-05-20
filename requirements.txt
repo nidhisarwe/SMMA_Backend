@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+google-generativeai
+motor
+pydantic
+python-dotenv
+passlib[bcrypt]

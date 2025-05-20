@@ -1,0 +1,1 @@
+# Creates AI-powered ad copies
