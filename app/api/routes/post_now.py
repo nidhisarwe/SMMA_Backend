@@ -1,32 +1,3 @@
-# from fastapi import APIRouter, HTTPException
-# from pydantic import BaseModel
-# import logging
-# from app.services.social_media_poster import post_to_instagram
-#
-# router = APIRouter()
-#
-# class PostRequest(BaseModel):
-#     image_url: str
-#     caption: str
-#     access_token: str
-#
-# @router.post("/post-now/")
-# async def post_now(request: PostRequest):
-#     logging.info(f"📩 Received request: {request.dict()}")  # Log incoming request
-#
-#     if not request.access_token:
-#         raise HTTPException(status_code=400, detail="Missing access_token. Please reconnect Instagram.")
-#
-#     result = post_to_instagram(request.image_url, request.caption, request.access_token)
-#
-#     # Log API response for debugging
-#     logging.info(f"📡 Instagram API Response: {result}")
-#
-#     if "error" in result:
-#         raise HTTPException(status_code=400, detail=result["error"])
-#
-#     return result
-
 import logging
 from fastapi import APIRouter, HTTPException, Body
 import requests
@@ -55,6 +26,7 @@ async def post_now(data: dict = Body(...)):
         caption = data.get("caption")
         image_url = data.get("image_url")
         user_id = data.get("user_id", "current_user_id")
+        is_carousel = data.get("is_carousel", False)
 
         if not platform:
             raise HTTPException(status_code=400, detail="Platform is required")
@@ -83,9 +55,23 @@ async def post_now(data: dict = Body(...)):
                 detail=f"No connected {platform} account found. Please connect your account first."
             )
 
+        # Process the image_url based on is_carousel flag
+        processed_image_url = None
+        if image_url:
+            if isinstance(image_url, list):
+                if is_carousel:
+                    # For carousel posts, keep the list
+                    processed_image_url = image_url
+                else:
+                    # For non-carousel posts, use the first image
+                    processed_image_url = image_url[0] if image_url else None
+            else:
+                # Single image URL
+                processed_image_url = image_url
+
         # Handle posting based on platform
         if platform == "linkedin":
-            response = await post_to_linkedin(account, caption, image_url)
+            response = await post_to_linkedin(account, caption, processed_image_url)
 
         elif platform == "facebook":
             # Placeholder for Facebook posting
@@ -118,24 +104,57 @@ async def post_to_linkedin(account, content, image_url=None):
     """
     Post content to LinkedIn using the connected account
     """
-    # Determine the correct LinkedIn account URL
-    user_urn = f"urn:li:person:{account['account_id']}" if account[
-                                                               "account_type"] == "personal" else f"urn:li:organization:{account['account_id']}"
+    try:
+        # Determine the correct LinkedIn account URN based on account_type
+        user_urn = None
 
-    # Post using LinkedIn API
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "http://127.0.0.1:8000/api/linkedin/post",  # Call the LinkedIn post endpoint
-            json={
-                "account_id": account["account_id"],
-                "content": content,
-                "image_url": image_url,
-                "user_id": account["user_id"]
-            }
+        if account.get("account_type") == "personal":
+            user_urn = f"urn:li:person:{account['account_id_on_platform']}"
+        else:  # Company/organization account
+            user_urn = f"urn:li:organization:{account['account_id_on_platform']}"
+
+        logger.info(f"Posting to LinkedIn as: {user_urn}")
+        logger.info(f"Content: {content}")
+        logger.info(f"Image URL: {image_url}")
+
+        # Prepare the request payload
+        request_payload = {
+            "account_id": account["account_id_on_platform"],
+            "content": content,
+            "user_id": account["user_id"]
+        }
+
+        # Handle image_url based on whether it's a carousel or single image
+        if image_url:
+            # For LinkedIn, we pass the image URL as is (the LinkedIn service will handle
+            # the array case by taking the first image for carousel posts)
+            request_payload["image_url"] = image_url
+
+        # Make the API call to the LinkedIn endpoint
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "http://127.0.0.1:8000/api/linkedin/post",  # Call the LinkedIn post endpoint
+                json=request_payload,
+                timeout=60  # Increase timeout for image processing
+            )
+
+            if response.status_code != 200:
+                error_detail = response.json().get("detail", "Unknown error")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"LinkedIn posting failed: {error_detail}"
+                )
+
+            result = response.json()
+            logger.info(f"LinkedIn post response: {result}")
+            return result
+
+    except httpx.TimeoutException:
+        logger.error("LinkedIn posting request timed out")
+        raise HTTPException(
+            status_code=504,
+            detail="LinkedIn posting timed out. This might be due to slow image processing."
         )
-
-        if response.status_code != 200:
-            error_detail = response.json().get("detail", "Unknown error")
-            raise HTTPException(status_code=response.status_code, detail=f"LinkedIn posting failed: {error_detail}")
-
-        return response.json()
+    except Exception as e:
+        logger.error(f"Error posting to LinkedIn: {str(e)}")
+        raise
