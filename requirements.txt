@@ -24,6 +24,8 @@ python-jose[cryptography] # For JWT creation and validation (alternative: PyJWT)
 # Environment variable management
 python-dotenv
 
+pytz
+
 # HTTP clients
 requests          # For synchronous HTTP requests (e.g., to Gemini, Groq, Hugging Face)
 httpx             # For asynchronous HTTP requests (e.g., LinkedIn service)
