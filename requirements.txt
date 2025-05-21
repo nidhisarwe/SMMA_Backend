@@ -1,7 +1,42 @@
-fastapi
-uvicorn
 google-generativeai
-motor
+
+# requirements.txt
+
+# Core FastAPI and ASGI server
+fastapi
+uvicorn[standard] # Includes httptools and uvloop for performance
+
+# Data validation and settings
 pydantic
+pydantic-settings # For managing settings, good practice
+email-validator   # For Pydantic's EmailStr validation
+
+# Database (MongoDB Async)
+motor
+pymongo           # motor dependency, provides bson
+
+# Authentication and Security
+passlib[bcrypt]   # For password hashing
+python-jose[cryptography] # For JWT creation and validation (alternative: PyJWT)
+# If you specifically used PyJWT in your security.py as per my previous suggestion, use:
+# PyJWT
+
+# Environment variable management
 python-dotenv
-passlib[bcrypt]
+
+# HTTP clients
+requests          # For synchronous HTTP requests (e.g., to Gemini, Groq, Hugging Face)
+httpx             # For asynchronous HTTP requests (e.g., LinkedIn service)
+
+# AI/Agent Framework
+crewai
+
+# For form data parsing (e.g. OAuth2PasswordRequestForm in auth.py)
+python-multipart
+
+# Optional: For better performance with asyncio event loop (primarily Linux)
+# uvloop
+
+# Optional: For faster HTTP parsing with Uvicorn
+# httptools
+langchain_groq
