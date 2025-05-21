@@ -199,7 +199,7 @@ class PostScheduler:
                         "is_carousel": post.get("is_carousel", False),
                         "user_id": user_id
                     },
-                    timeout=60  # 60 second timeout for image processing
+                    timeout=3600  # 60 second timeout for image processing
                 )
 
                 if response.status_code != 200:
