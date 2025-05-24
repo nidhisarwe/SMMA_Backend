@@ -1,64 +1,67 @@
 import os
-from typing import List, Dict, Optional
-from pathlib import Path
 import requests
-from datetime import datetime
-import logging
+import time
+from dotenv import load_dotenv
 
-logger = logging.getLogger(__name__)
+load_dotenv()
+API_KEY = os.getenv("HF_IMAGE_API_KEY")
+
+# Supported models with fallback order
+MODELS = [
+    "stabilityai/stable-diffusion-xl-base-1.0",
+    "runwayml/stable-diffusion-v1-5",
+    # "CompVis/stable-diffusion-v1-4"
+]
 
 
-class ImageGenerator:
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
-        self.headers = {"Authorization": f"Bearer {self.api_key}"}
-        self.output_dir = Path("output/generated_images")
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+def generate_image(prompt: str):
+    """Generate image from text prompt with model fallback"""
+    if not API_KEY:
+        raise Exception("Hugging Face API key not configured")
 
-    def generate_single_image(self, prompt: str, style_prompt: Optional[str] = None) -> str:
-        full_prompt = f"{prompt}, {style_prompt}" if style_prompt else prompt
+    headers = {"Authorization": f"Bearer {API_KEY}"}
 
+    last_error = None
+
+    for model in MODELS:
         try:
             response = requests.post(
-                self.base_url,
-                headers=self.headers,
-                json={"inputs": full_prompt},
+                f"https://api-inference.huggingface.co/models/{model}",
+                headers=headers,
+                json={"inputs": prompt},
+                timeout=30
             )
 
-            if response.status_code != 200:
-                logger.error(f"Image generation failed: {response.text}")
-                return None
+            if response.status_code == 200:
+                return response.content
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"generated_{timestamp}.jpg"
-            output_path = self.output_dir / filename
+            # Handle specific error cases
+            error_data = response.json()
 
-            with open(output_path, "wb") as f:
-                f.write(response.content)
+            if "estimated_time" in error_data:
+                wait_time = error_data.get("estimated_time", 10)
+                time.sleep(wait_time)
 
-            return str(output_path)
+                # Retry once after waiting
+                response = requests.post(
+                    f"https://api-inference.huggingface.co/models/{model}",
+                    headers=headers,
+                    json={"inputs": prompt},
+                    timeout=30
+                )
 
-        except Exception as e:
-            logger.error(f"Error generating image: {str(e)}")
-            return None
+                if response.status_code == 200:
+                    return response.content
+                else:
+                    last_error = error_data.get("error", "Model is still loading")
 
-    def batch_generate(self, prompts: List[Dict], content_type: str = "image") -> List[str]:
-        if content_type != "image":
-            logger.warning(f"Unsupported content type: {content_type}")
-            return []
+            elif "error" in error_data:
+                last_error = error_data["error"]
+            else:
+                last_error = f"API returned status code {response.status_code}"
 
-        generated_files = []
+        except requests.exceptions.RequestException as e:
+            last_error = str(e)
+            continue  # Try next model
 
-        for prompt_data in prompts:
-            main_prompt = prompt_data.get("prompt", "")
-            style_prompt = prompt_data.get("style_prompt", None)
-
-            if not main_prompt:
-                continue
-
-            image_path = self.generate_single_image(main_prompt, style_prompt)
-            if image_path:
-                generated_files.append(image_path)
-
-        return generated_files
+    raise Exception(last_error or "All models failed to generate image")

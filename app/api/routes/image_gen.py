@@ -82,3 +82,66 @@ async def generate_image_endpoint(request: ImageGenerationRequest):
                 "supported_models": MODELS
             }
         )
+
+# from fastapi import APIRouter, HTTPException, Response
+# from app.services.image_generator import generate_image, MODELS
+# from pydantic import BaseModel
+# from typing import Optional
+# from PIL import Image
+# from io import BytesIO
+# import logging
+
+# router = APIRouter()
+# logger = logging.getLogger(__name__)
+# logging.basicConfig(level=logging.DEBUG)
+
+# class ImageRequest(BaseModel):
+#     prompt: str
+#     model: Optional[str] = None
+
+# @router.post("/generate-image/")
+# async def generate_image_endpoint(request: ImageRequest):
+#     try:
+#         if not request.prompt.strip():
+#             raise HTTPException(
+#                 status_code=400,
+#                 detail={"error": "Prompt cannot be empty"}
+#             )
+
+#         logger.info(f"Processing image generation for prompt: {request.prompt}")
+#         image_data = generate_image(request.prompt)
+
+#         if not image_data:
+#             raise HTTPException(
+#                 status_code=500,
+#                 detail={"error": "Received empty image data from model"}
+#             )
+
+#         # Detect image format
+#         try:
+#             img = Image.open(BytesIO(image_data))
+#             media_type = f"image/{img.format.lower()}"
+#             file_extension = img.format.lower()
+#         except Exception:
+#             media_type = "image/jpeg"
+#             file_extension = "jpeg"
+
+#         logger.info("Image generation successful")
+#         return Response(
+#             content=image_data,
+#             media_type=media_type,
+#             headers={"Content-Disposition": f"attachment; filename=generated_image.{file_extension}"}
+#         )
+
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Image generation failed: {str(e)}", exc_info=True)
+#         raise HTTPException(
+#             status_code=500,
+#             detail={
+#                 "error": str(e),
+#                 "message": "Image generation failed",
+#                 "supported_models": MODELS
+#             }
+#         )

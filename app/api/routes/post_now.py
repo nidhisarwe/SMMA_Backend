@@ -1,16 +1,15 @@
 import logging
-from fastapi import APIRouter, HTTPException, Body
-import requests
+from fastapi import APIRouter, HTTPException, Body, Depends
 from datetime import datetime
 from app.database import connected_accounts_collection
+from app.api.dependencies import auth_required
 import httpx
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-
 @router.post("/post-now/")
-async def post_now(data: dict = Body(...)):
+async def post_now(data: dict = Body(...), current_user_id: str = Depends(auth_required)):
     """
     Post content to a social media platform immediately
 
@@ -20,12 +19,12 @@ async def post_now(data: dict = Body(...)):
     - platform: social media platform name
     - caption: content to post
     - image_url: optional image URL (string or array of strings for carousel)
+    - is_carousel: boolean indicating if the post is a carousel
     """
     try:
         platform = data.get("platform", "").lower()
         caption = data.get("caption")
         image_url = data.get("image_url")
-        user_id = data.get("user_id", "current_user_id")
         is_carousel = data.get("is_carousel", False)
 
         if not platform:
@@ -44,7 +43,7 @@ async def post_now(data: dict = Body(...)):
 
         # Get connected account for this platform
         account = await connected_accounts_collection.find_one({
-            "user_id": user_id,
+            "user_id": current_user_id,  # Use authenticated user ID
             "platform": platform,
             "is_active": True
         })
@@ -55,34 +54,47 @@ async def post_now(data: dict = Body(...)):
                 detail=f"No connected {platform} account found. Please connect your account first."
             )
 
+        # Check for token expiration
+        if account.get("expires_at") and account["expires_at"] < datetime.utcnow():
+            logger.warning(f"Access token expired for LinkedIn account {account['account_id_on_platform']}")
+            raise HTTPException(
+                status_code=401,
+                detail="LinkedIn access token has expired. Please reconnect your account."
+            )
+
         # Process the image_url based on is_carousel flag
         processed_image_url = None
         if image_url:
+            logger.info(f"Raw image_url received: {image_url}")
             if isinstance(image_url, list):
                 if is_carousel:
-                    # For carousel posts, keep the list
                     processed_image_url = image_url
+                    logger.info(f"Using carousel images: {processed_image_url}")
                 else:
-                    # For non-carousel posts, use the first image
-                    processed_image_url = image_url[0] if image_url else None
+                    processed_image_url = image_url[0] if image_url and len(image_url) > 0 else None
+                    logger.info(f"Using first image from list: {processed_image_url}")
             else:
-                # Single image URL
                 processed_image_url = image_url
+                logger.info(f"Using single image: {processed_image_url}")
+        else:
+            logger.warning("No image_url provided in request")
+            
+        # Ensure image_url is not empty or None
+        if processed_image_url == "" or (isinstance(processed_image_url, list) and len(processed_image_url) == 0) or processed_image_url == [] or processed_image_url is None:
+            logger.warning("Empty image_url detected, setting to None")
+            processed_image_url = None
 
         # Handle posting based on platform
         if platform == "linkedin":
             response = await post_to_linkedin(account, caption, processed_image_url)
 
         elif platform == "facebook":
-            # Placeholder for Facebook posting
             raise HTTPException(status_code=501, detail="Facebook posting not implemented yet")
 
         elif platform == "instagram":
-            # Placeholder for Instagram posting
             raise HTTPException(status_code=501, detail="Instagram posting not implemented yet")
 
         elif platform == "twitter":
-            # Placeholder for Twitter posting
             raise HTTPException(status_code=501, detail="Twitter posting not implemented yet")
 
         return {
@@ -93,21 +105,52 @@ async def post_now(data: dict = Body(...)):
         }
 
     except HTTPException as he:
-        # Re-raise HTTP exceptions
         raise he
     except Exception as e:
-        logger.error(f"Error in post_now: {str(e)}")
+        logger.error(f"Error in post_now for user {current_user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to post content: {str(e)}")
-
 
 async def post_to_linkedin(account, content, image_url=None):
     """
     Post content to LinkedIn using the connected account
     """
     try:
+        from app.services.linkedin_service import LinkedInService
+        linkedin_service = LinkedInService()
+
+        # Check if token is expired and attempt to refresh
+        if account.get("expires_at") and account["expires_at"] < datetime.utcnow():
+            logger.info(f"Attempting to refresh token for LinkedIn account {account['account_id_on_platform']}")
+            if not account.get("refresh_token"):
+                raise HTTPException(
+                    status_code=401,
+                    detail="No refresh token available. Please reconnect your LinkedIn account."
+                )
+            
+            token_data = await linkedin_service.refresh_token(account["refresh_token"])
+            if not token_data:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Failed to refresh LinkedIn access token. Please reconnect your account."
+                )
+
+            # Update account with new token data
+            await connected_accounts_collection.update_one(
+                {"_id": account["_id"]},
+                {
+                    "$set": {
+                        "access_token": token_data["access_token"],
+                        "refresh_token": token_data.get("refresh_token", account["refresh_token"]),
+                        "expires_at": datetime.utcnow() + timedelta(seconds=token_data["expires_in"]),
+                        "updated_at": datetime.utcnow(),
+                    }
+                }
+            )
+            account["access_token"] = token_data["access_token"]
+            logger.info(f"Successfully refreshed token for LinkedIn account {account['account_id_on_platform']}")
+
         # Determine the correct LinkedIn account URN based on account_type
         user_urn = None
-
         if account.get("account_type") == "personal":
             user_urn = f"urn:li:person:{account['account_id_on_platform']}"
         else:  # Company/organization account
@@ -117,37 +160,15 @@ async def post_to_linkedin(account, content, image_url=None):
         logger.info(f"Content: {content}")
         logger.info(f"Image URL: {image_url}")
 
-        # Prepare the request payload
-        request_payload = {
-            "account_id": account["account_id_on_platform"],
-            "content": content,
-            "user_id": account["user_id"]
-        }
+        # Create the post
+        post_id = await linkedin_service.create_post(
+            access_token=account["access_token"],
+            user_urn=user_urn,
+            content=content,
+            image_url=image_url
+        )
 
-        # Handle image_url based on whether it's a carousel or single image
-        if image_url:
-            # For LinkedIn, we pass the image URL as is (the LinkedIn service will handle
-            # the array case by taking the first image for carousel posts)
-            request_payload["image_url"] = image_url
-
-        # Make the API call to the LinkedIn endpoint
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "http://127.0.0.1:8000/api/linkedin/post",  # Call the LinkedIn post endpoint
-                json=request_payload,
-                timeout=60  # Increase timeout for image processing
-            )
-
-            if response.status_code != 200:
-                error_detail = response.json().get("detail", "Unknown error")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"LinkedIn posting failed: {error_detail}"
-                )
-
-            result = response.json()
-            logger.info(f"LinkedIn post response: {result}")
-            return result
+        return {"post_id": post_id}
 
     except httpx.TimeoutException:
         logger.error("LinkedIn posting request timed out")
