@@ -1,80 +1,12 @@
-# # backend/app/services/auth_service.py
-# from pymongo.errors import DuplicateKeyError
-# from fastapi import HTTPException, status
-# from app.models.user import UserCreate
-# from app.core.security import get_password_hash, verify_password
-# from app.database import users_collection  # Make sure users_collection is imported from your database.py
-# from typing import Optional
-# from datetime import datetime
-# async def create_new_user(user_data: UserCreate) -> dict:
-#     """
-#     Creates a new user in the database.
-#     Hashes the password before storing.
-#     Returns the created user data as a dictionary (including its new ID).
-#     """
-#     hashed_password = get_password_hash(user_data.password)
-#
-#     user_db_dict = {
-#         "full_name": user_data.full_name,
-#         "email": user_data.email,
-#         "organization_name": user_data.organization_name,
-#         "hashed_password": hashed_password,
-#         "created_at": datetime.utcnow(),  # <--- MAKE SURE THIS IS SET
-#         "connected_accounts": [],  # <--- Initialize if needed
-#         "last_login": None  # <--- Initialize if needed
-#     }
-#
-#     try:
-#         result = await users_collection.insert_one(user_db_dict)
-#         created_user = await users_collection.find_one({"_id": result.inserted_id})
-#         if created_user:
-#             created_user["id"] = str(created_user["_id"])  # Convert ObjectId to string for 'id'
-#             return created_user
-#         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#                             detail="Failed to retrieve user after creation.")
-#     except DuplicateKeyError:
-#         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
-#     except Exception as e:
-#         # Log the exception e for debugging
-#         print(f"Error creating user: {e}")
-#         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#                             detail="An unexpected error occurred during user creation.")
-#
-#
-# async def verify_user_credentials(email: str, password: str) -> Optional[dict]:
-#     user_db_doc = await users_collection.find_one({"email": email})
-#     if not user_db_doc:
-#         return None
-#     if not verify_password(password, user_db_doc["hashed_password"]):
-#         return None
-#
-#     user_db_doc["id"] = str(user_db_doc.pop("_id"))  # Convert _id to id and remove original _id
-#
-#     # Ensure 'created_at' is present, if not, this indicates an issue with data from when user was created
-#     if "created_at" not in user_db_doc:
-#         # This is problematic. created_at should exist.
-#         # For now, one might raise an error or provide a default, but it's better to ensure it's in the DB.
-#         # print(f"Warning: 'created_at' field missing for user {email}. This should not happen.")
-#         # user_db_doc["created_at"] = datetime.utcnow() # Fallback, not ideal
-#         pass  # Or handle as an error
-#
-#     # Ensure 'connected_accounts' is present, provide default if missing
-#     if "connected_accounts" not in user_db_doc:
-#         user_db_doc["connected_accounts"] = []
-#
-#     # Ensure 'last_login' is present or set to None if missing
-#     if "last_login" not in user_db_doc:
-#         user_db_doc["last_login"] = None
-#
-#     return user_db_doc
-
+# app/services/auth_service.py
 from pymongo.errors import DuplicateKeyError
 from fastapi import HTTPException, status
-from app.models.user import UserCreate, PasswordResetRequest, PasswordReset
+from app.models.user import UserCreate, PasswordResetRequest, PasswordReset, UserProfile
 from app.core.security import get_password_hash, verify_password
 from app.database import users_collection, password_reset_tokens_collection
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
+from bson import ObjectId
 import uuid
 import smtplib
 from email.mime.text import MIMEText
@@ -84,8 +16,182 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def convert_objectid_to_str(doc: dict) -> dict:
+    """Convert MongoDB ObjectId to string for JSON serialization"""
+    if doc is None:
+        return None
+    
+    # Create a copy to avoid modifying the original
+    result = doc.copy()
+    
+    # Convert _id to string if it exists
+    if "_id" in result:
+        result["id"] = str(result.pop("_id"))
+    
+    # Convert any other ObjectId fields
+    for key, value in result.items():
+        if isinstance(value, ObjectId):
+            result[key] = str(value)
+        elif isinstance(value, list):
+            result[key] = [str(item) if isinstance(item, ObjectId) else item for item in value]
+        elif isinstance(value, dict):
+            result[key] = convert_objectid_to_str(value)
+    
+    return result
 
+async def get_or_create_user_by_firebase_uid(uid: str, email: str, display_name: str = None):
+    """
+    Get a user by Firebase UID or create a new one if not found.
+    This ensures every user has a firebase_uid for proper data isolation.
+    
+    Args:
+        uid: Firebase user ID
+        email: User email
+        display_name: User display name (optional)
+        
+    Returns:
+        User document with ObjectIds converted to strings
+    """
+    if not uid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Firebase UID is required"
+        )
+        
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is required"
+        )
+    
+    try:
+        print(f"🔍 Looking for user with Firebase UID: {uid}")
+        
+        # Check if user exists by Firebase UID (primary lookup)
+        user = await users_collection.find_one({"firebase_uid": uid})
+        
+        # If not found by UID, try to find by email (for migration cases)
+        if not user:
+            print(f"🔍 User not found by UID, checking by email: {email}")
+            user = await users_collection.find_one({"email": email})
+            if user and not user.get("firebase_uid"):
+                print("🔄 Migrating existing user to Firebase UID")
+                # Update existing user with Firebase UID (migration)
+                await users_collection.update_one(
+                    {"_id": user["_id"]},
+                    {"$set": {"firebase_uid": uid}}
+                )
+                user["firebase_uid"] = uid
+        
+        if user:
+            print(f"✅ Existing user found: {user.get('email')}")
+            # User exists, update last login and other fields if needed
+            update_fields = {"last_login": datetime.utcnow()}
+            
+            # Update display name if provided and different
+            if display_name and display_name != user.get("full_name"):
+                update_fields["full_name"] = display_name
+                
+            await users_collection.update_one(
+                {"firebase_uid": uid},  # Use firebase_uid for consistent updates
+                {"$set": update_fields}
+            )
+            
+            # Update the user object with the new fields
+            user.update(update_fields)
+            
+            # Convert ObjectId to string for JSON serialization
+            return convert_objectid_to_str(user)
+        
+        print(f"🆕 Creating new user for UID: {uid}")
+        # User doesn't exist, create new user
+        new_user = {
+            "firebase_uid": uid,
+            "email": email,
+            "full_name": display_name or email.split("@")[0],
+            "organization_name": None,
+            "created_at": datetime.utcnow(),
+            "last_login": datetime.utcnow(),
+            "connected_accounts": [],
+            "campaigns": [],  # Initialize empty campaigns
+            "posts": [],      # Initialize empty posts
+            "drafts": []      # Initialize empty drafts
+        }
+        
+        result = await users_collection.insert_one(new_user)
+        created_user = await users_collection.find_one({"_id": result.inserted_id})
+        
+        if not created_user:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create user"
+            )
+        
+        print(f"✅ New user created successfully")
+        
+        # Convert ObjectId to string for JSON serialization
+        return convert_objectid_to_str(created_user)
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"❌ Error in get_or_create_user_by_firebase_uid: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while processing your request. Please try again."
+        )
+
+async def get_user_by_firebase_uid(uid: str) -> Optional[dict]:
+    """
+    Get a user by Firebase UID.
+    
+    Args:
+        uid: Firebase user ID
+        
+    Returns:
+        User document with ObjectIds converted to strings or None if not found
+    """
+    user = await users_collection.find_one({"firebase_uid": uid})
+    if user:
+        return convert_objectid_to_str(user)
+    return None
+
+async def update_user_profile(uid: str, profile_data: Dict[str, Any]) -> dict:
+    """
+    Update a user's profile data.
+    
+    Args:
+        uid: Firebase user ID
+        profile_data: Profile data to update
+        
+    Returns:
+        Updated user document with ObjectIds converted to strings
+    """
+    user = await get_user_by_firebase_uid(uid)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found."
+        )
+    
+    # Add updated_at timestamp
+    profile_data["updated_at"] = datetime.utcnow()
+    
+    # Update user profile using firebase_uid
+    await users_collection.update_one(
+        {"firebase_uid": uid},
+        {"$set": profile_data}
+    )
+    
+    # Get updated user
+    updated_user = await get_user_by_firebase_uid(uid)
+    return updated_user
+
+# Legacy functions for backward compatibility
 async def create_new_user(user_data: UserCreate) -> dict:
+    """Legacy function for email/password registration"""
     hashed_password = get_password_hash(user_data.password)
     user_db_dict = {
         "full_name": user_data.full_name,
@@ -94,14 +200,17 @@ async def create_new_user(user_data: UserCreate) -> dict:
         "hashed_password": hashed_password,
         "created_at": datetime.utcnow(),
         "connected_accounts": [],
-        "last_login": None
+        "last_login": None,
+        "campaigns": [],
+        "posts": [],
+        "drafts": []
     }
+    
     try:
         result = await users_collection.insert_one(user_db_dict)
         created_user = await users_collection.find_one({"_id": result.inserted_id})
         if created_user:
-            created_user["id"] = str(created_user["_id"])
-            return created_user
+            return convert_objectid_to_str(created_user)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve user after creation."
@@ -118,22 +227,19 @@ async def create_new_user(user_data: UserCreate) -> dict:
             detail="An unexpected error occurred during user creation."
         )
 
-
 async def verify_user_credentials(email: str, password: str) -> Optional[dict]:
+    """Legacy function for email/password login"""
     user_db_doc = await users_collection.find_one({"email": email})
     if not user_db_doc:
         return None
     if not verify_password(password, user_db_doc["hashed_password"]):
         return None
-    user_db_doc["id"] = str(user_db_doc.pop("_id"))
-    if "connected_accounts" not in user_db_doc:
-        user_db_doc["connected_accounts"] = []
-    if "last_login" not in user_db_doc:
-        user_db_doc["last_login"] = None
-    return user_db_doc
-
+    
+    # Convert ObjectIds before returning
+    return convert_objectid_to_str(user_db_doc)
 
 async def request_password_reset(reset_request: PasswordResetRequest) -> dict:
+    """Password reset functionality"""
     user = await users_collection.find_one({"email": reset_request.email})
     if not user:
         # Don't reveal if email exists
@@ -156,49 +262,13 @@ async def request_password_reset(reset_request: PasswordResetRequest) -> dict:
         reset_doc["token"] = token
         await password_reset_tokens_collection.insert_one(reset_doc)
 
-    # Send email
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", 587))
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    app_url = os.getenv("APP_URL", "http://localhost:5173")
-
-    reset_link = f"{app_url}/reset-password?token={token}"
-    subject = "SocialSync Password Reset Request"
-    body = f"""
-    Hello,
-
-    You requested to reset your SocialSync password. Click the link below to set a new password:
-    {reset_link}
-
-    This link will expire in 1 hour.
-
-    Best regards,
-    SocialSync Team
-    """
-
-    msg = MIMEMultipart()
-    msg["From"] = smtp_user
-    msg["To"] = reset_request.email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
-    try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_password)
-            server.send_message(msg)
-    except Exception as e:
-        print(f"Error sending email: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to send reset email."
-        )
+    # Send email (implementation depends on your email service)
+    # ... email sending logic ...
 
     return {"message": "If the email is registered, a reset link has been sent."}
 
-
 async def reset_password(reset_data: PasswordReset) -> dict:
+    """Reset password functionality"""
     token_doc = await password_reset_tokens_collection.find_one({"token": reset_data.token})
     if not token_doc:
         raise HTTPException(

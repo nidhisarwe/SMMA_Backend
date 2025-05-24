@@ -42,3 +42,8 @@ python-multipart
 # Optional: For faster HTTP parsing with Uvicorn
 # httptools
 langchain_groq
+
+#Firebase
+firebase-admin
+
+pillow

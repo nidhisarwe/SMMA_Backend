@@ -1,238 +1,270 @@
-from fastapi import APIRouter, HTTPException, Body, Query, Path
-from app.database import scheduled_posts_collection
+from fastapi import APIRouter, HTTPException, Depends, status
+from app.database import scheduled_posts_collection, campaign_schedules_collection
+from app.api.dependencies import auth_required
 from datetime import datetime
 from bson import ObjectId
-from typing import Dict, Any, List, Optional, Union  # Added Union
-import logging
-from pydantic import BaseModel, Field
+from typing import List, Optional
+import traceback
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 
-class SchedulePostRequest(BaseModel):
-    caption: str
-    image_url: Union[str, List[str]]  # Changed to Union
-    platform: str
-    scheduled_time: datetime
-    is_carousel: bool = False
-    user_id: str = "current_user_id"
-    tags: List[str] = Field(default_factory=list)
-    account_id_on_platform: Optional[str] = None  # Added
-    account_type: Optional[str] = None  # Added
-
-
-class UpdateScheduledPostRequest(BaseModel):
-    caption: Optional[str] = None
-    image_url: Optional[Union[str, List[str]]] = None  # Changed to Union
-    scheduled_time: Optional[datetime] = None
-    status: Optional[str] = None
-    tags: Optional[List[str]] = None
-    account_id_on_platform: Optional[str] = None  # Added
-    account_type: Optional[str] = None  # Added
-
-
-@router.post("/schedule-post/")
-async def schedule_post(request: SchedulePostRequest):
+@router.get("/scheduled-posts")
+async def get_all_posts(current_user_id: str = Depends(auth_required)):
     """
-    Schedule a post to be published at a specific time
+    Get all scheduled posts for the authenticated user.
+    
+    Args:
+        current_user_id: The authenticated user ID from Firebase token
+        
+    Returns:
+        List of user's scheduled posts
     """
     try:
-        post_data = request.dict()
-
-        # Add additional fields
-        post_data["status"] = "scheduled"
-        post_data["created_at"] = datetime.utcnow()
-
-        # Ensure account_id_on_platform and account_type are included
-        # Pydantic's dict() should handle this if they are in the request
-        # but explicit assignment is fine if needed.
-        # post_data["account_id_on_platform"] = request.account_id_on_platform
-        # post_data["account_type"] = request.account_type
-
-        logger.info(f"Scheduling post data: {post_data}")
-
-        # Insert into the database
-        result = await scheduled_posts_collection.insert_one(post_data)
-
-        logger.info(f"Post scheduled successfully with ID: {result.inserted_id}")
-
-        return {
-            "message": "Post scheduled successfully",
-            "id": str(result.inserted_id),
-            "scheduled_time": post_data["scheduled_time"].isoformat(),
-            "account_id_on_platform": post_data.get("account_id_on_platform")
-        }
-    except Exception as e:
-        logger.error(f"Failed to schedule post: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to schedule post: {str(e)}")
-
-
-@router.get("/scheduled-posts/")
-async def get_scheduled_posts(user_id: str = Query("current_user_id")):
-    """
-    Get all scheduled posts for a user
-    """
-    try:
-        logger.info(f"Fetching scheduled posts for user_id: {user_id}")
-        cursor = scheduled_posts_collection.find({"user_id": user_id})
-        posts = await cursor.to_list(length=None)
-        logger.info(f"Found {len(posts)} posts for user_id: {user_id}")
-
-        # Format the response
-        formatted_posts = []
+        # Find all posts for the current user
+        cursor = scheduled_posts_collection.find({"user_id": current_user_id})
+        posts = await cursor.to_list(length=100)
+        
+        # Convert ObjectId to string for JSON serialization
         for post in posts:
-            post_id = str(post.pop("_id"))
-            post["id"] = post_id
-
-            # Format dates to ISO strings
-            for field in ["scheduled_time", "created_at", "published_at", "attempted_at"]:
-                if field in post and isinstance(post[field], datetime):
-                    post[field] = post[field].isoformat()
-
-            # Ensure account_id_on_platform is included if present
-            if "account_id_on_platform" not in post:
-                post["account_id_on_platform"] = None  # Default if not present
-            if "account_type" not in post:
-                post["account_type"] = None
-
-            formatted_posts.append(post)
-
-        # logger.debug(f"Formatted posts: {formatted_posts}")
-        return formatted_posts
+            post["id"] = str(post["_id"])
+            post["campaign_id"] = str(post["campaign_id"])
+            del post["_id"]
+        
+        return {"posts": posts}
     except Exception as e:
-        logger.error(f"Failed to fetch scheduled posts: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch scheduled posts: {str(e)}")
+        print(f"Error getting posts: {e}")
+        traceback_str = traceback.format_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while fetching posts: {str(e)}"
+        )
 
 
 @router.get("/scheduled-posts/{post_id}")
-async def get_scheduled_post(post_id: str = Path(...)):
+async def get_post_by_id(post_id: str, current_user_id: str = Depends(auth_required)):
     """
-    Get a specific scheduled post by ID
+    Get a specific scheduled post by ID, ensuring it belongs to the authenticated user.
+    
+    Args:
+        post_id: The ID of the post to retrieve
+        current_user_id: The authenticated user ID from Firebase token
+        
+    Returns:
+        Post details if found and owned by the user
     """
     try:
-        # Skip this endpoint if "stats" is in the path
-        if post_id == "stats":  # This handles the old stats path if hit directly
-            raise HTTPException(status_code=404, detail="Stats endpoint is now /api/scheduled-posts-stats/")
-
-        post = await scheduled_posts_collection.find_one({"_id": ObjectId(post_id)})
+        # Find the post and ensure it belongs to the current user
+        post = await scheduled_posts_collection.find_one({
+            "_id": ObjectId(post_id),
+            "user_id": current_user_id
+        })
+        
         if not post:
-            raise HTTPException(status_code=404, detail="Post not found")
-
-        # Format the response
-        post["id"] = str(post.pop("_id"))
-
-        # Format dates to ISO strings
-        for field in ["scheduled_time", "created_at", "published_at", "attempted_at"]:
-            if field in post and isinstance(post[field], datetime):
-                post[field] = post[field].isoformat()
-
-        if "account_id_on_platform" not in post:
-            post["account_id_on_platform"] = None
-        if "account_type" not in post:
-            post["account_type"] = None
-
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Post not found or you don't have permission to access it"
+            )
+        
+        # Convert ObjectId to string for JSON serialization
+        post["id"] = str(post["_id"])
+        post["campaign_id"] = str(post["campaign_id"])
+        del post["_id"]
+        
         return post
-    except HTTPException:
-        raise
-    except bson.errors.InvalidId:
-        raise HTTPException(status_code=400, detail="Invalid post ID format.")
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Failed to fetch scheduled post {post_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch scheduled post: {str(e)}")
-
-
-@router.patch("/scheduled-posts/{post_id}")
-async def update_scheduled_post(post_id: str, update_data: UpdateScheduledPostRequest):
-    """
-    Update a scheduled post
-    """
-    try:
-        data_dict = update_data.dict(exclude_unset=True)
-        if not data_dict:
-            raise HTTPException(status_code=400, detail="No update data provided")
-
-        # Add updated_at timestamp
-        data_dict["updated_at"] = datetime.utcnow()
-
-        # Update the post
-        result = await scheduled_posts_collection.update_one(
-            {"_id": ObjectId(post_id)},
-            {"$set": data_dict}
+        print(f"Error getting post: {e}")
+        traceback_str = traceback.format_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while fetching the post: {str(e)}"
         )
 
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Post not found")
 
-        return {
-            "message": "Post updated successfully",
-            "id": post_id
+@router.post("/scheduled-posts")
+async def create_post(post_data: dict, current_user_id: str = Depends(auth_required)):
+    """
+    Create a new scheduled post for the authenticated user.
+    
+    Args:
+        post_data: Post data including content, scheduled_time, campaign_id, etc.
+        current_user_id: The authenticated user ID from Firebase token
+        
+    Returns:
+        Created post details
+    """
+    try:
+        # Verify the campaign exists and belongs to the user
+        campaign = await campaign_schedules_collection.find_one({
+            "_id": ObjectId(post_data["campaign_id"]),
+            "user_id": current_user_id
+        })
+        
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found or you don't have permission to add posts to it"
+            )
+        
+        # Prepare post data
+        new_post = {
+            "content": post_data["content"],
+            "media_urls": post_data.get("media_urls", []),
+            "scheduled_time": datetime.fromisoformat(post_data["scheduled_time"]),
+            "campaign_id": ObjectId(post_data["campaign_id"]),
+            "user_id": current_user_id,
+            "status": "scheduled",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "platform": post_data.get("platform", "all"),
+            "hashtags": post_data.get("hashtags", []),
+            "mentions": post_data.get("mentions", [])
         }
-    except HTTPException:
-        raise
-    except bson.errors.InvalidId:
-        raise HTTPException(status_code=400, detail="Invalid post ID format.")
+        
+        # Insert the post
+        result = await scheduled_posts_collection.insert_one(new_post)
+        
+        # Return the created post
+        created_post = await scheduled_posts_collection.find_one({"_id": result.inserted_id})
+        created_post["id"] = str(created_post["_id"])
+        created_post["campaign_id"] = str(created_post["campaign_id"])
+        del created_post["_id"]
+        
+        return created_post
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Failed to update scheduled post {post_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update scheduled post: {str(e)}")
+        print(f"Error creating post: {e}")
+        traceback_str = traceback.format_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while creating the post: {str(e)}"
+        )
+
+
+@router.put("/scheduled-posts/{post_id}")
+async def update_post(post_id: str, post_data: dict, current_user_id: str = Depends(auth_required)):
+    """
+    Update a scheduled post, ensuring it belongs to the authenticated user.
+    
+    Args:
+        post_id: The ID of the post to update
+        post_data: Updated post data
+        current_user_id: The authenticated user ID from Firebase token
+        
+    Returns:
+        Updated post details
+    """
+    try:
+        # Find the post and ensure it belongs to the current user
+        existing_post = await scheduled_posts_collection.find_one({
+            "_id": ObjectId(post_id),
+            "user_id": current_user_id
+        })
+        
+        if not existing_post:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Post not found or you don't have permission to update it"
+            )
+        
+        # Prepare update data
+        update_data = {
+            "content": post_data.get("content", existing_post["content"]),
+            "media_urls": post_data.get("media_urls", existing_post.get("media_urls", [])),
+            "scheduled_time": datetime.fromisoformat(post_data["scheduled_time"]) if "scheduled_time" in post_data else existing_post["scheduled_time"],
+            "status": post_data.get("status", existing_post["status"]),
+            "updated_at": datetime.utcnow(),
+            "platform": post_data.get("platform", existing_post.get("platform", "all")),
+            "hashtags": post_data.get("hashtags", existing_post.get("hashtags", [])),
+            "mentions": post_data.get("mentions", existing_post.get("mentions", []))
+        }
+        
+        # Update the post
+        await scheduled_posts_collection.update_one(
+            {"_id": ObjectId(post_id)},
+            {"$set": update_data}
+        )
+        
+        # Return the updated post
+        updated_post = await scheduled_posts_collection.find_one({"_id": ObjectId(post_id)})
+        updated_post["id"] = str(updated_post["_id"])
+        updated_post["campaign_id"] = str(updated_post["campaign_id"])
+        del updated_post["_id"]
+        
+        return updated_post
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        print(f"Error updating post: {e}")
+        traceback_str = traceback.format_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while updating the post: {str(e)}"
+        )
 
 
 @router.delete("/scheduled-posts/{post_id}")
-async def delete_scheduled_post(post_id: str):
+async def delete_post(post_id: str, current_user_id: str = Depends(auth_required)):
     """
-    Delete a scheduled post
+    Delete a scheduled post, ensuring it belongs to the authenticated user.
+    
+    Args:
+        post_id: The ID of the post to delete
+        current_user_id: The authenticated user ID from Firebase token
+        
+    Returns:
+        Success message
     """
     try:
-        result = await scheduled_posts_collection.delete_one({"_id": ObjectId(post_id)})
-
+        print(f"Attempting to delete post with ID: {post_id}")
+        
+        # Try to convert to ObjectId, but handle the case where it might not be a valid ObjectId
+        try:
+            obj_id = ObjectId(post_id)
+            # Find the post and ensure it belongs to the current user
+            existing_post = await scheduled_posts_collection.find_one({
+                "_id": obj_id,
+                "user_id": current_user_id
+            })
+        except Exception as e:
+            print(f"Error converting to ObjectId: {e}, trying with string ID")
+            # If ObjectId conversion fails, try with the string ID directly
+            existing_post = await scheduled_posts_collection.find_one({
+                "id": post_id,  # Some posts might use 'id' instead of '_id'
+                "user_id": current_user_id
+            })
+        
+        if not existing_post:
+            print(f"Post not found with ID: {post_id} for user: {current_user_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Post not found or you don't have permission to delete it"
+            )
+        
+        print(f"Found post to delete: {existing_post.get('_id')}")
+        
+        # Delete the post using the _id from the found document
+        result = await scheduled_posts_collection.delete_one({"_id": existing_post.get("_id")})
+        
         if result.deleted_count == 0:
-            raise HTTPException(status_code=404, detail="Post not found")
-
+            print(f"Failed to delete post with ID: {post_id}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete the post"
+            )
+        
+        print(f"Successfully deleted post with ID: {post_id}")
         return {"message": "Post deleted successfully"}
-    except HTTPException:
-        raise
-    except bson.errors.InvalidId:
-        raise HTTPException(status_code=400, detail="Invalid post ID format.")
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        logger.error(f"Failed to delete scheduled post {post_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete scheduled post: {str(e)}")
-
-
-# This is the specific endpoint for stats
-@router.get("/scheduled-posts-stats/")
-async def get_scheduled_posts_stats(user_id: str = Query("current_user_id")):
-    """
-    Get statistics about scheduled posts
-    """
-    try:
-        # Count total posts
-        total_posts = await scheduled_posts_collection.count_documents({"user_id": user_id})
-
-        # Count posts by platform
-        pipeline_platform = [
-            {"$match": {"user_id": user_id}},
-            {"$group": {"_id": "$platform", "count": {"$sum": 1}}}
-        ]
-        platform_cursor = scheduled_posts_collection.aggregate(pipeline_platform)
-        platforms = {}
-        async for item in platform_cursor:
-            platforms[item["_id"]] = item["count"]
-
-        # Count posts by status
-        pipeline_status = [
-            {"$match": {"user_id": user_id}},
-            {"$group": {"_id": "$status", "count": {"$sum": 1}}}
-        ]
-        status_cursor = scheduled_posts_collection.aggregate(pipeline_status)
-        statuses = {}
-        async for item in status_cursor:
-            statuses[item["_id"]] = item["count"]
-
-        return {
-            "total_posts": total_posts,
-            "by_platform": platforms,
-            "by_status": statuses
-        }
-    except Exception as e:
-        logger.error(f"Failed to fetch scheduled posts stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch scheduled posts stats: {str(e)}")
+        print(f"Error deleting post: {e}")
+        traceback_str = traceback.format_exc()
+        print(traceback_str)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An error occurred while deleting the post: {str(e)}"
+        )

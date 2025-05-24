@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from fastapi import HTTPException
 import logging
 import json
+import uuid
 
 load_dotenv()
 
@@ -18,19 +19,33 @@ class LinkedInService:
         self.client_id = os.getenv("LINKEDIN_CLIENT_ID")
         self.client_secret = os.getenv("LINKEDIN_CLIENT_SECRET")
         self.redirect_uri = os.getenv("LINKEDIN_REDIRECT_URI")
+        
+        # Log warning instead of raising error to prevent app from crashing
         if not all([self.client_id, self.client_secret, self.redirect_uri]):
-            logger.error("Missing LinkedIn environment variables")
-            raise ValueError(
-                "Missing LinkedIn environment variables: LINKEDIN_CLIENT_ID, LINKEDIN_CLIENT_SECRET, or LINKEDIN_REDIRECT_URI")
+            logger.warning("Missing LinkedIn environment variables. LinkedIn integration may not work properly.")
+            logger.warning("Please set LINKEDIN_CLIENT_ID, LINKEDIN_CLIENT_SECRET, and LINKEDIN_REDIRECT_URI environment variables.")
+            logger.warning("You can obtain these credentials from the LinkedIn Developer Portal.")
+            
         self.auth_url = "https://www.linkedin.com/oauth/v2/authorization"
         self.token_url = "https://www.linkedin.com/oauth/v2/accessToken"
         self.profile_url = "https://api.linkedin.com/v2/userinfo"
+        # Scopes needed for posting to LinkedIn and accessing profile information
         self.scopes = ["openid", "profile", "email", "w_member_social"]
 
     async def get_auth_url(self, state: str = None):
         try:
             if not state:
-                state = "random_state_string"
+                state = str(uuid.uuid4())
+            
+            # Check if LinkedIn credentials are configured
+            if not all([self.client_id, self.client_secret, self.redirect_uri]):
+                logger.error("LinkedIn credentials not properly configured")
+                raise HTTPException(
+                    status_code=500, 
+                    detail="LinkedIn integration is not properly configured. Please contact the administrator."
+                )
+            
+            # Generate LinkedIn OAuth URL
             params = {
                 "response_type": "code",
                 "client_id": self.client_id,
@@ -39,17 +54,32 @@ class LinkedInService:
                 "state": state
             }
             auth_url = f"{self.auth_url}?{urlencode(params)}"
+            
+            # Validate the generated URL
             if not auth_url.startswith("https://www.linkedin.com"):
                 logger.error(f"Invalid auth URL generated: {auth_url}")
                 raise ValueError("Generated LinkedIn auth URL is invalid")
-            logger.info(f"Generated auth URL: {auth_url}")
+                
+            logger.info(f"Generated LinkedIn auth URL with state: {state}")
             return auth_url
+        except HTTPException as he:
+            # Re-raise HTTP exceptions
+            raise he
         except Exception as e:
             logger.error(f"Failed to generate LinkedIn auth URL: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to generate LinkedIn auth URL: {str(e)}")
 
     async def exchange_code_for_token(self, code: str):
         """Exchange authorization code for access token"""
+        # Check if LinkedIn credentials are configured
+        if not all([self.client_id, self.client_secret, self.redirect_uri]):
+            logger.error("LinkedIn credentials not properly configured")
+            raise HTTPException(
+                status_code=500, 
+                detail="LinkedIn integration is not properly configured. Please contact the administrator."
+            )
+        
+        # Prepare token exchange request
         token_data = {
             "grant_type": "authorization_code",
             "code": code,
@@ -58,21 +88,67 @@ class LinkedInService:
             "client_secret": self.client_secret
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(self.token_url, data=token_data)
-            if response.status_code != 200:
-                logger.error(f"Failed to exchange code for token: {response.text}")
-                raise HTTPException(status_code=400, detail="Failed to get access token")
-            return response.json()
+        try:
+            # Exchange code for token
+            async with httpx.AsyncClient() as client:
+                logger.info(f"Exchanging code for token with LinkedIn")
+                response = await client.post(self.token_url, data=token_data)
+                
+                if response.status_code != 200:
+                    logger.error(f"Failed to exchange code for token: {response.text}")
+                    error_detail = "Failed to get access token"
+                    try:
+                        error_data = response.json()
+                        if "error_description" in error_data:
+                            error_detail = error_data["error_description"]
+                    except:
+                        pass
+                    raise HTTPException(status_code=400, detail=error_detail)
+                
+                token_response = response.json()
+                logger.info("Successfully obtained LinkedIn access token")
+                return token_response
+        except HTTPException as he:
+            # Re-raise HTTP exceptions
+            raise he
+        except Exception as e:
+            logger.error(f"Error during token exchange: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error during token exchange: {str(e)}")
 
     async def get_user_profile(self, access_token: str):
+        """Get LinkedIn user profile information using the access token"""
+        if not access_token:
+            logger.error("No access token provided")
+            raise HTTPException(status_code=400, detail="Access token is required")
+        
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(self.profile_url, headers=headers)
-            if response.status_code != 200:
-                logger.error(f"Failed to get user profile: {response.text}")
-                raise HTTPException(status_code=400, detail="Failed to get user profile")
-            return response.json()
+        
+        try:
+            # Get user profile from LinkedIn
+            async with httpx.AsyncClient() as client:
+                logger.info("Fetching user profile from LinkedIn")
+                response = await client.get(self.profile_url, headers=headers)
+                
+                if response.status_code != 200:
+                    logger.error(f"Failed to get user profile: {response.text}")
+                    error_detail = "Failed to get user profile"
+                    try:
+                        error_data = response.json()
+                        if "error_description" in error_data:
+                            error_detail = error_data["error_description"]
+                    except:
+                        pass
+                    raise HTTPException(status_code=400, detail=error_detail)
+                
+                profile_data = response.json()
+                logger.info(f"Successfully retrieved LinkedIn profile for user: {profile_data.get('sub')}")
+                return profile_data
+        except HTTPException as he:
+            # Re-raise HTTP exceptions
+            raise he
+        except Exception as e:
+            logger.error(f"Error retrieving user profile: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Error retrieving user profile: {str(e)}")
 
     async def refresh_token(self, refresh_token: str):
         token_data = {
