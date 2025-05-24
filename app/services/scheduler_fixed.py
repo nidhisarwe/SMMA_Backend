@@ -48,6 +48,22 @@ class PostScheduler:
             # Wait for 1 minute before checking again
             await asyncio.sleep(60)
 
+    def _safe_convert_to_ist(self, dt):
+        """Safely convert a datetime to IST timezone"""
+        try:
+            if dt is None:
+                return None
+            
+            # If datetime has no timezone info, assume it's UTC
+            if dt.tzinfo is None:
+                dt = pytz.UTC.localize(dt)
+            
+            # Convert to IST
+            return dt.astimezone(IST)
+        except Exception as e:
+            logger.error(f"Error converting datetime to IST: {str(e)}")
+            return dt  # Return original datetime if conversion fails
+
     async def _check_posts_to_publish(self):
         """Check for posts that are scheduled to be published in the next 5 minutes"""
         # Get current time in UTC
@@ -55,8 +71,8 @@ class PostScheduler:
         window_end_utc = now_utc + datetime.timedelta(minutes=5)
 
         # Log times in both UTC and IST for debugging
-        now_ist = now_utc.replace(tzinfo=pytz.UTC).astimezone(IST)
-        window_end_ist = window_end_utc.replace(tzinfo=pytz.UTC).astimezone(IST)
+        now_ist = self._safe_convert_to_ist(now_utc)
+        window_end_ist = self._safe_convert_to_ist(window_end_utc)
 
         logger.info(f"Checking for posts to publish between {now_utc} and {window_end_utc} UTC")
         logger.info(f"Current time in IST: {now_ist.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
@@ -66,7 +82,7 @@ class PostScheduler:
         async for post in scheduled_posts_collection.find({"status": "scheduled"}):
             post_id = str(post["_id"])
             scheduled_time = post["scheduled_time"]
-            scheduled_time_ist = scheduled_time.replace(tzinfo=pytz.UTC).astimezone(IST)
+            scheduled_time_ist = self._safe_convert_to_ist(scheduled_time)
             logger.info(
                 f"Found scheduled post {post_id} set for {scheduled_time} UTC / {scheduled_time_ist.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
 
@@ -83,7 +99,7 @@ class PostScheduler:
             past_due_count += 1
             post_id = str(post["_id"])
             scheduled_time = post["scheduled_time"]
-            scheduled_time_ist = scheduled_time.replace(tzinfo=pytz.UTC).astimezone(IST)
+            scheduled_time_ist = self._safe_convert_to_ist(scheduled_time)
             
             logger.warning(f"Found past due post {post_id} that was scheduled for {scheduled_time} UTC / "
                          f"{scheduled_time_ist.strftime('%Y-%m-%d %H:%M:%S %Z%z')}. Publishing now.")
@@ -114,7 +130,7 @@ class PostScheduler:
 
             # Get scheduled time (stored in UTC) and log it in both UTC and IST for debugging
             publish_time_utc = post["scheduled_time"]
-            publish_time_ist = publish_time_utc.replace(tzinfo=pytz.UTC).astimezone(IST)
+            publish_time_ist = self._safe_convert_to_ist(publish_time_utc)
 
             logger.info(
                 f"Found post {post_id} to publish at {publish_time_utc} UTC / {publish_time_ist.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
@@ -220,20 +236,17 @@ class PostScheduler:
 
         # Extract content from post data with fallbacks for different field names
         caption = post.get("caption", post.get("content", ""))
+        image_url = post.get("image_url", post.get("media_urls", []))
         
-        # Safely handle image_url with proper null checks
-        image_url = None
-        raw_image_url = post.get("image_url", post.get("media_urls", []))
+        # Safely handle image_url
+        if image_url is not None:
+            if isinstance(image_url, list):
+                if len(image_url) > 0:
+                    image_url = image_url[0]
+                else:
+                    image_url = None
         
-        if raw_image_url:
-            if isinstance(raw_image_url, list):
-                if len(raw_image_url) > 0 and raw_image_url[0]:
-                    image_url = raw_image_url[0]
-            else:
-                image_url = raw_image_url
-                
-        # Determine if this is a carousel post
-        is_carousel = post.get("is_carousel", False) and isinstance(raw_image_url, list) and len(raw_image_url) > 1
+        is_carousel = post.get("is_carousel", False)
         
         # Ensure we have the minimum required data
         if not caption:
