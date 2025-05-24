@@ -18,7 +18,7 @@ async def get_all_campaigns(current_user_id: str = Depends(auth_required)):
     try:
         cursor = campaign_schedules_collection.find({"user_id": current_user_id}).sort("created_at", -1)
         campaigns = await cursor.to_list(length=100)
-        
+
         formatted_campaigns = []
         for campaign in campaigns:
             # Count actual posts in scheduled_posts collection for this campaign
@@ -26,7 +26,7 @@ async def get_all_campaigns(current_user_id: str = Depends(auth_required)):
                 "campaign_id": str(campaign["_id"]),
                 "user_id": current_user_id
             })
-            
+
             # Get parsed_posts from different possible locations in the campaign data
             parsed_posts = []
             if "parsed_posts" in campaign and isinstance(campaign["parsed_posts"], list):
@@ -35,7 +35,7 @@ async def get_all_campaigns(current_user_id: str = Depends(auth_required)):
             elif "content" in campaign and isinstance(campaign["content"], dict) and "parsed_posts" in campaign["content"]:
                 parsed_posts = campaign["content"]["parsed_posts"]
                 print(f"Found {len(parsed_posts)} parsed_posts in campaign.content for {campaign.get('campaign_name')}")
-            
+
             formatted_campaign = {
                 "_id": str(campaign["_id"]),
                 "campaign_name": campaign.get("campaign_name", campaign.get("name", "Untitled Campaign")),
@@ -51,9 +51,9 @@ async def get_all_campaigns(current_user_id: str = Depends(auth_required)):
                 "post_count": len(parsed_posts) if parsed_posts else posts_count  # Use parsed_posts count if available
             }
             formatted_campaigns.append(formatted_campaign)
-        
+
         return formatted_campaigns
-        
+
     except Exception as e:
         print(f"Error getting campaigns: {e}")
         traceback_str = traceback.format_exc()
@@ -75,27 +75,27 @@ async def get_campaign_schedule_by_id(campaign_id: str, current_user_id: str = D
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid campaign ID format"
             )
-        
+
         campaign = await campaign_schedules_collection.find_one({
             "_id": campaign_obj_id,
             "user_id": current_user_id
         })
-        
+
         if not campaign:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Campaign not found or you don't have permission to access it"
             )
-        
+
         campaign["id"] = str(campaign.pop("_id"))
-        
+
         if isinstance(campaign.get("created_at"), datetime):
             campaign["created_at"] = campaign["created_at"].isoformat()
         if isinstance(campaign.get("updated_at"), datetime):
             campaign["updated_at"] = campaign["updated_at"].isoformat()
-        
+
         return campaign
-        
+
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -120,21 +120,21 @@ async def generate_campaign_content(campaign_id: str, current_user_id: str = Dep
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid campaign ID format"
             )
-        
+
         campaign = await campaign_schedules_collection.find_one({
             "_id": campaign_obj_id,
             "user_id": current_user_id
         })
-        
+
         if not campaign:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Campaign not found or you don't have permission to access it"
             )
-        
+
         # We'll no longer automatically create scheduled posts
         # Instead, we'll just update the campaign status
-        
+
         # Check if the campaign has parsed_posts
         if not campaign.get("parsed_posts"):
             # If no parsed_posts, we can't do anything
@@ -142,10 +142,10 @@ async def generate_campaign_content(campaign_id: str, current_user_id: str = Dep
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Campaign has no content to generate posts from"
             )
-        
+
         # Log that we're not automatically scheduling posts
         print(f"Campaign {campaign_id} has {len(campaign.get('parsed_posts', []))} posts ready to be scheduled manually")
-        
+
         # Update campaign status to active
         await campaign_schedules_collection.update_one(
             {"_id": campaign_obj_id, "user_id": current_user_id},
@@ -156,9 +156,9 @@ async def generate_campaign_content(campaign_id: str, current_user_id: str = Dep
                 }
             }
         )
-        
+
         return {"message": "Content generated and posts scheduled successfully for campaign"}
-        
+
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -180,7 +180,7 @@ async def create_campaign(campaign_data: dict, current_user_id: str = Depends(au
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Campaign name is required"
             )
-        
+
         new_campaign = {
             "campaign_name": campaign_data["name"],
             "theme": campaign_data.get("theme", ""),
@@ -193,14 +193,14 @@ async def create_campaign(campaign_data: dict, current_user_id: str = Depends(au
             "posts": [],
             "post_count": 0
         }
-        
+
         result = await campaign_schedules_collection.insert_one(new_campaign)
-        
+
         created_campaign = await campaign_schedules_collection.find_one({"_id": result.inserted_id})
         created_campaign["id"] = str(created_campaign.pop("_id"))
-        
+
         return created_campaign
-        
+
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -224,22 +224,22 @@ async def update_campaign(campaign_id: str, campaign_data: dict, current_user_id
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid campaign ID format"
             )
-        
+
         existing_campaign = await campaign_schedules_collection.find_one({
             "_id": campaign_obj_id,
             "user_id": current_user_id
         })
-        
+
         if not existing_campaign:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Campaign not found or you don't have permission to update it"
             )
-        
+
         update_data = {
             "updated_at": datetime.utcnow()
         }
-        
+
         if "name" in campaign_data:
             update_data["campaign_name"] = campaign_data["name"]
         if "theme" in campaign_data:
@@ -250,25 +250,25 @@ async def update_campaign(campaign_id: str, campaign_data: dict, current_user_id
             update_data["end_date"] = campaign_data["end_date"]
         if "status" in campaign_data:
             update_data["status"] = campaign_data["status"]
-        
+
         await campaign_schedules_collection.update_one(
             {"_id": campaign_obj_id, "user_id": current_user_id},
             {"$set": update_data}
         )
-        
+
         updated_campaign = await campaign_schedules_collection.find_one({
             "_id": campaign_obj_id,
             "user_id": current_user_id
         })
         updated_campaign["id"] = str(updated_campaign.pop("_id"))
-        
+
         if isinstance(updated_campaign.get("created_at"), datetime):
             updated_campaign["created_at"] = updated_campaign["created_at"].isoformat()
         if isinstance(updated_campaign.get("updated_at"), datetime):
             updated_campaign["updated_at"] = updated_campaign["updated_at"].isoformat()
-        
+
         return updated_campaign
-        
+
     except HTTPException as e:
         raise e
     except Exception as e:
@@ -293,34 +293,34 @@ async def delete_campaign(campaign_id: str, current_user_id: str = Depends(auth_
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid campaign ID format"
             )
-        
+
         existing_campaign = await campaign_schedules_collection.find_one({
             "_id": campaign_obj_id,
             "user_id": current_user_id
         })
-        
+
         if not existing_campaign:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Campaign not found or you don't have permission to delete it"
             )
-        
+
         # Delete all associated posts first
         deleted_posts_result = await scheduled_posts_collection.delete_many({
             "campaign_id": campaign_id,
             "user_id": current_user_id
         })
-        
+
         # Delete the campaign
         await campaign_schedules_collection.delete_one({
             "_id": campaign_obj_id,
             "user_id": current_user_id
         })
-        
+
         return {
             "message": f"Campaign deleted successfully along with {deleted_posts_result.deleted_count} associated posts"
         }
-        
+
     except HTTPException as e:
         raise e
     except Exception as e:
